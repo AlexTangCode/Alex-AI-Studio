@@ -1,0 +1,5 @@
+{
+  "name": "Happy Hens Tracker",
+  "description": "A dedicated mobile-friendly application to track the daily egg-laying counts of your two hens, featuring insightful charts and AI-powered poultry care advice.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,18 @@
+
+{
+  "name": "快乐母鸡助手",
+  "short_name": "母鸡助手",
+  "description": "记录母鸡下蛋数量与重量的专业管家",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#fffbeb",
+  "theme_color": "#f59e0b",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2632/2632839.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
