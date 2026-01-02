@@ -14,6 +14,11 @@ export interface EggRecord {
   weight?: number; // In grams
 }
 
+export interface User {
+  email: string;
+  cloudId: string; // 经过哈希处理的唯一标识符
+}
+
 export enum Tab {
   TRACK = 'TRACK',
   STATS = 'STATS',
@@ -27,8 +32,4 @@ export enum StatPeriod {
   YEAR = 'YEAR'
 }
 
-export interface DailySummary {
-  date: string;
-  totalCount: number;
-  avgWeight: number;
-}
+export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
