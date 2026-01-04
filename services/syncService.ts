@@ -1,57 +1,42 @@
 
 /**
- * 自动同步服务 - 稳定增强版
- * 修复了 Bucket ID 长度限制问题 (必须为 20 位)
+ * 自动同步服务 - 终极稳定版
+ * 修复了跨域预检(CORS Preflight)可能导致的失败
  */
 
-// 严格 20 位字母数字 ID
-const BUCKET_ID = 'hens7f9e8a5c4b2d1f0e'; 
+// 严格 20 位标识符，确保唯一且稳定
+const BUCKET_ID = 'stable_hens_2025_v99'; 
 const API_BASE = `https://kvdb.io/${BUCKET_ID}`;
 
 export const pushToCloud = async (cloudId: string, data: any) => {
-  try {
-    const payload = JSON.stringify({ ...data, lastUpdated: Date.now() });
-    const response = await fetch(`${API_BASE}/${cloudId}`, {
-      method: 'PUT',
-      mode: 'cors',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: payload,
-    });
-    
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Server ${response.status}: ${errText}`);
-    }
-    return true;
-  } catch (error) {
-    console.error('[Sync] Upload Error:', error);
-    throw error; // 抛出错误以便 UI 捕获具体信息
+  // 增加时间戳，确保服务器感知到更新
+  const payload = JSON.stringify({ ...data, lastUpdated: Date.now() });
+  
+  const response = await fetch(`${API_BASE}/${cloudId}`, {
+    method: 'PUT',
+    // 简化请求头，避免复杂的预检请求
+    body: payload,
+  });
+  
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`写入失败(${response.status}): ${text.substring(0, 20)}`);
   }
+  return true;
 };
 
 export const pullFromCloud = async (cloudId: string) => {
-  try {
-    const response = await fetch(`${API_BASE}/${cloudId}?nocache=${Date.now()}`, {
-      method: 'GET',
-      mode: 'cors',
-      cache: 'no-store',
-      headers: {
-        'Accept': 'application/json',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-      }
-    });
-    
-    if (response.status === 404) return { isNewUser: true };
-    if (!response.ok) throw new Error(`Server ${response.status}`);
-    
-    const text = await response.text();
-    return JSON.parse(text);
-  } catch (error) {
-    console.error('[Sync] Download Error:', error);
-    throw error;
-  }
+  // 添加随机数防止任何形式的 CDN 或浏览器缓存
+  const url = `${API_BASE}/${cloudId}?t=${Date.now()}`;
+  
+  const response = await fetch(url, {
+    method: 'GET',
+    cache: 'no-store'
+  });
+  
+  if (response.status === 404) return { isNewUser: true };
+  if (!response.ok) throw new Error(`读取失败(${response.status})`);
+  
+  const data = await response.json();
+  return data;
 };
