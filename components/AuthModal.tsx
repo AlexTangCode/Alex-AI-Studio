@@ -8,20 +8,20 @@ interface AuthModalProps {
 }
 
 const AuthModal: React.FC<AuthModalProps> = ({ onLogin }) => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) return;
+    if (!code) return;
     setLoading(true);
+    setError('');
     try {
-      const user = await authenticate(email, password);
+      const user = await authenticate(code);
       onLogin(user);
     } catch (err) {
-      setError('登录失败，请重试');
+      setError('连接同步服务器失败，请检查网络');
     } finally {
       setLoading(false);
     }
@@ -29,51 +29,40 @@ const AuthModal: React.FC<AuthModalProps> = ({ onLogin }) => {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-amber-50">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-20 h-20 bg-amber-100 rounded-[30px] text-4xl mb-4 shadow-sm animate-bounce">🐔</div>
-          <h1 className="text-3xl font-black text-amber-900">鸡舍管家</h1>
-          <p className="text-slate-400 font-medium mt-2">登录后即可多端实时同步</p>
-        </div>
+      <div className="w-full max-w-sm text-center">
+        <div className="inline-flex items-center justify-center w-24 h-24 bg-white rounded-[40px] text-5xl mb-6 shadow-xl shadow-amber-200/50 animate-bounce">🐔</div>
+        <h1 className="text-3xl font-black text-amber-900 mb-2">母鸡记账本</h1>
+        <p className="text-slate-400 font-bold mb-10 text-sm">输入同步码，开启多端同步</p>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-xs font-black text-slate-400 ml-4 uppercase tracking-widest">邮箱地址</label>
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="relative">
             <input 
-              type="email" 
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              className="w-full bg-white border-2 border-transparent focus:border-amber-400 rounded-3xl p-5 outline-none font-bold shadow-sm transition-all"
-              placeholder="your@email.com"
+              type="text" 
+              value={code}
+              onChange={e => setCode(e.target.value)}
+              className="w-full bg-white border-4 border-amber-100 focus:border-amber-500 rounded-[32px] p-6 text-center text-3xl font-black text-amber-600 outline-none transition-all placeholder:text-amber-100"
+              placeholder="如：6688"
               required
             />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-black text-slate-400 ml-4 uppercase tracking-widest">访问密码</label>
-            <input 
-              type="password" 
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              className="w-full bg-white border-2 border-transparent focus:border-amber-400 rounded-3xl p-5 outline-none font-bold shadow-sm transition-all"
-              placeholder="••••••••"
-              required
-            />
+            <label className="absolute -top-3 left-1/2 -translate-x-1/2 bg-amber-50 px-4 text-[10px] font-black text-amber-600 uppercase tracking-widest">设置你的同步码</label>
           </div>
           
-          {error && <p className="text-red-500 text-xs text-center font-bold">{error}</p>}
+          {error && <p className="text-red-500 text-xs font-bold bg-red-50 py-2 rounded-xl">{error}</p>}
 
           <button 
             type="submit" 
             disabled={loading}
-            className="w-full bg-amber-500 hover:bg-amber-600 text-white font-black py-5 rounded-3xl shadow-xl shadow-amber-200 transition-all active:scale-95 disabled:opacity-70"
+            className="w-full bg-amber-500 hover:bg-amber-600 text-white font-black py-6 rounded-[32px] shadow-xl shadow-amber-200 transition-all active:scale-95 disabled:opacity-70 text-xl"
           >
-            {loading ? '同步中...' : '进入我的鸡舍'}
+            {loading ? '正在同步数据...' : '进入鸡舍'}
           </button>
         </form>
 
-        <p className="text-center mt-8 text-slate-400 text-xs px-6 leading-relaxed">
-          温馨提示：如果账号不存在将自动创建。数据存储在加密云端，确保隐私安全。
-        </p>
+        <div className="mt-12 p-6 bg-white/50 rounded-3xl border border-white">
+          <p className="text-slate-400 text-xs font-bold leading-relaxed">
+            💡 提示：在另一台手机上输入相同的数字，即可看到同步的数据。
+          </p>
+        </div>
       </div>
     </div>
   );
