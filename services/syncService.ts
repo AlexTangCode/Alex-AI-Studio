@@ -1,11 +1,11 @@
 
 /**
- * 自动同步服务 - 增强版
- * 解决了缓存导致的数据滞后问题
+ * 自动同步服务 - 稳定增强版
+ * 修复了 Bucket ID 长度限制问题 (必须为 20 位)
  */
 
-// 更换一个全新的 Bucket ID 确保环境纯净
-const BUCKET_ID = 'happy_hens_v3_final_sync'; 
+// 严格 20 位字母数字 ID
+const BUCKET_ID = 'hens7f9e8a5c4b2d1f0e'; 
 const API_BASE = `https://kvdb.io/${BUCKET_ID}`;
 
 export const pushToCloud = async (cloudId: string, data: any) => {
@@ -13,33 +13,45 @@ export const pushToCloud = async (cloudId: string, data: any) => {
     const payload = JSON.stringify({ ...data, lastUpdated: Date.now() });
     const response = await fetch(`${API_BASE}/${cloudId}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      mode: 'cors',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
       body: payload,
     });
     
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Server ${response.status}: ${errText}`);
+    }
     return true;
   } catch (error) {
     console.error('[Sync] Upload Error:', error);
-    return false;
+    throw error; // 抛出错误以便 UI 捕获具体信息
   }
 };
 
 export const pullFromCloud = async (cloudId: string) => {
   try {
-    // 使用 no-cache 策略和随机数双重保险
-    const response = await fetch(`${API_BASE}/${cloudId}?nocache=${Math.random()}`, {
+    const response = await fetch(`${API_BASE}/${cloudId}?nocache=${Date.now()}`, {
+      method: 'GET',
+      mode: 'cors',
       cache: 'no-store',
-      headers: { 'Pragma': 'no-cache', 'Cache-Control': 'no-cache' }
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
     });
     
     if (response.status === 404) return { isNewUser: true };
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Server ${response.status}`);
     
     const text = await response.text();
     return JSON.parse(text);
   } catch (error) {
     console.error('[Sync] Download Error:', error);
-    return null;
+    throw error;
   }
 };
