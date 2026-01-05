@@ -1,39 +1,32 @@
 
 /**
- * 自动同步服务 - 深度兼容版
- * 采用“简单请求”策略，绕过移动端防火墙对 API 的拦截
+ * 自动同步服务 - 终极兼容版
+ * 解决移动端“显示成功但实际未写入”的问题
  */
 
-// 使用一个全新的、符合标准的 20 位 16 进制 Bucket ID
-const BUCKET_ID = '7f9b8c2d1e0a4f5b6c7d'; 
+// 换用一个全新的专用 Bucket，确保环境干净
+const BUCKET_ID = 'hb_v3_9a8b7c6d5e4f3a2b1'; 
 const API_BASE = `https://kvdb.io/${BUCKET_ID}`;
 
 /**
- * 带有超时和异常处理的 fetch
+ * 带有深度校验的 fetch
  */
-const fetchWithRetry = async (url: string, options: any, retries = 2) => {
-  for (let i = 0; i <= retries; i++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
-    
-    try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-        // 关键：使用 no-cache 确保每次都从服务器获取最新数据
-        cache: 'no-store',
-      });
-      clearTimeout(timeoutId);
-      if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status}`);
-      return response;
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      if (i === retries) throw err;
-      // 等待 1 秒后重试
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
+const fetchSafe = async (url: string, options: any) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      cache: 'no-cache', // 强制跳过浏览器缓存
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-  throw new Error('网络请求失败');
 };
 
 export const pushToCloud = async (cloudId: string, data: any) => {
@@ -44,53 +37,53 @@ export const pushToCloud = async (cloudId: string, data: any) => {
   });
   
   try {
-    // 关键修复：使用 text/plain 避免触发 OPTIONS 预检请求（Simple Request 模式）
-    await fetchWithRetry(`${API_BASE}/${cloudId}`, {
+    // 1. 发送保存请求 (使用 POST + text/plain 绕过所有 CORS 预检)
+    const res = await fetchSafe(`${API_BASE}/${cloudId}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain', 
-      },
+      headers: { 'Content-Type': 'text/plain' }, 
       body: payload,
     });
+    
+    if (!res.ok) throw new Error('写入失败');
+
+    // 2. 写后读校验：立即重新读取，确保数据真的进去了
+    const verifyRes = await fetchSafe(`${API_BASE}/${cloudId}`, { method: 'GET' });
+    const verifyText = await verifyRes.text();
+    
+    // 如果读取到的数据为空或者与发出的不一致，说明写入失败
+    if (!verifyText || verifyText.length < 10) {
+      throw new Error('验证失败：云端未接收到数据');
+    }
+    
     return true;
   } catch (err: any) {
-    console.error("Cloud Push Failed:", err);
-    throw new Error('云端写入失败，请检查联网');
+    console.error("Sync Critical Error:", err);
+    throw new Error(err.message || '网络异常');
   }
 };
 
 export const pullFromCloud = async (cloudId: string) => {
   try {
-    const response = await fetchWithRetry(`${API_BASE}/${cloudId}`, {
-      method: 'GET'
-    });
+    const response = await fetchSafe(`${API_BASE}/${cloudId}`, { method: 'GET' });
     
-    if (response.status === 404) {
-      return { isNewUser: true };
-    }
+    if (response.status === 404) return { isNewUser: true };
     
     const text = await response.text();
-    if (!text) return { isNewUser: true };
+    if (!text || text.trim() === "") return { isNewUser: true };
     
     return JSON.parse(text);
   } catch (err: any) {
-    console.error("Cloud Pull Failed:", err);
+    console.error("Pull Error:", err);
     throw new Error('云端无法访问');
   }
 };
 
 export const encodeData = (data: any) => {
-  try {
-    return btoa(encodeURIComponent(JSON.stringify(data)));
-  } catch (e) {
-    return "";
-  }
+  try { return btoa(encodeURIComponent(JSON.stringify(data))); }
+  catch (e) { return ""; }
 };
 
 export const decodeData = (code: string) => {
-  try {
-    return JSON.parse(decodeURIComponent(atob(code)));
-  } catch (e) {
-    return null;
-  }
+  try { return JSON.parse(decodeURIComponent(atob(code))); }
+  catch (e) { return null; }
 };

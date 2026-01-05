@@ -25,13 +25,17 @@ const App: React.FC = () => {
   
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
   const [syncLog, setSyncLog] = useState<string>('就绪');
+  const [lastSyncTime, setLastSyncTime] = useState<string>('从未同步');
   const [isInitialPullDone, setIsInitialPullDone] = useState(false);
   
   const isSyncingRef = useRef(false);
   const lastSyncFingerprintRef = useRef('');
   const [recordingForHen, setRecordingForHen] = useState<Hen | null>(null);
 
-  const currentFingerprint = useMemo(() => JSON.stringify({ hens, records }), [hens, records]);
+  // 计算当前数据的指纹，用于判断是否需要上传
+  const currentFingerprint = useMemo(() => {
+    return `v1_${hens.length}_${records.length}_${records.slice(-1)[0]?.id || ''}`;
+  }, [hens, records]);
 
   useEffect(() => {
     const sh = localStorage.getItem(STORAGE_KEY + '_hens');
@@ -49,6 +53,9 @@ const App: React.FC = () => {
   const mergeData = useCallback((remote: any) => {
     if (!remote || remote.isNewUser) return;
     
+    // 如果云端没有任何记录，不要合并
+    if (!remote.hens?.length && !remote.records?.length) return;
+
     setHens(prev => {
       const merged = [...prev];
       (remote.hens || []).forEach((rh: Hen) => {
@@ -64,34 +71,44 @@ const App: React.FC = () => {
       });
       return Array.from(localMap.values()).sort((a, b) => a.timestamp - b.timestamp);
     });
+    
+    setLastSyncTime(new Date().toLocaleTimeString());
   }, []);
 
   const performSync = useCallback(async (isManual = false) => {
     if (!user || isSyncingRef.current) return;
     isSyncingRef.current = true;
     setSyncStatus('syncing');
-    if (isManual) addLog('正在尝试连接云端...');
     
     try {
       const remote = await pullFromCloud(user.cloudId);
+      
       if (remote && remote.isNewUser) {
-        addLog('初始化新空间...');
-        await pushToCloud(user.cloudId, { hens, records });
-        addLog('初始化完成');
+        // 只有本地有数据时才初始化云端，防止新设备反向覆盖旧数据
+        if (hens.length > 0 || records.length > 0) {
+          addLog('正在初始化云端...');
+          await pushToCloud(user.cloudId, { hens, records });
+          addLog('云端初始化成功');
+        } else {
+          addLog('云端暂无数据');
+        }
       } else if (remote) {
-        const remoteFingerprint = JSON.stringify({ hens: remote.hens, records: remote.records });
-        if (remoteFingerprint !== currentFingerprint) {
+        // 核心：对比指纹和记录数。如果本地为空而云端有，则强制拉取
+        const remoteFingerprint = `v1_${remote.hens?.length}_${remote.records?.length}_${remote.records?.slice(-1)[0]?.id || ''}`;
+        
+        if (remoteFingerprint !== currentFingerprint || hens.length === 0) {
           mergeData(remote);
           lastSyncFingerprintRef.current = remoteFingerprint;
-          addLog('已同步最新数据');
+          addLog('同步完成');
         } else {
-          addLog('已是最新状态');
+          addLog('已是最新');
         }
       }
       setIsInitialPullDone(true);
       setSyncStatus('synced');
+      setLastSyncTime(new Date().toLocaleTimeString());
     } catch (err: any) {
-      addLog(err.message || '连接受限', true);
+      addLog('连接失败，请检查网络', true);
     } finally {
       isSyncingRef.current = false;
     }
@@ -99,6 +116,7 @@ const App: React.FC = () => {
 
   const uploadData = useCallback(async () => {
     if (!user || !isInitialPullDone || isSyncingRef.current) return;
+    // 如果指纹没变，不需要上传
     if (currentFingerprint === lastSyncFingerprintRef.current) return;
 
     isSyncingRef.current = true;
@@ -106,10 +124,11 @@ const App: React.FC = () => {
     try {
       await pushToCloud(user.cloudId, { hens, records });
       lastSyncFingerprintRef.current = currentFingerprint;
-      addLog('已保存至云端');
+      addLog('已安全存入云端');
       setSyncStatus('synced');
+      setLastSyncTime(new Date().toLocaleTimeString());
     } catch (err: any) {
-      addLog('写入失败(请检查网络)', true);
+      addLog('写入失败，稍后重试', true);
     } finally {
       isSyncingRef.current = false;
     }
@@ -118,7 +137,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (user) {
       performSync();
-      const timer = setInterval(() => performSync(), 45000);
+      const timer = setInterval(() => performSync(), 60000);
       return () => clearInterval(timer);
     }
   }, [user, performSync]);
@@ -126,7 +145,8 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_hens', JSON.stringify(hens));
     localStorage.setItem(STORAGE_KEY + '_records', JSON.stringify(records));
-    const timer = setTimeout(() => uploadData(), 3000);
+    // 延迟 2 秒上传，防止频繁写
+    const timer = setTimeout(() => uploadData(), 2000);
     return () => clearTimeout(timer);
   }, [hens, records, uploadData]);
 
@@ -149,7 +169,7 @@ const App: React.FC = () => {
   };
 
   const handleLogin = (u: User) => { setUser(u); setIsInitialPullDone(false); localStorage.setItem(STORAGE_KEY + '_user', JSON.stringify(u)); };
-  const handleLogout = () => confirm('确定退出并清除本地缓存吗？') && (localStorage.clear(), window.location.reload());
+  const handleLogout = () => confirm('退出前请确保数据已同步。确定吗？') && (localStorage.clear(), window.location.reload());
 
   const todayStr = new Date().toISOString().split('T')[0];
   const statsData = useMemo(() => {
@@ -177,8 +197,8 @@ const App: React.FC = () => {
               <h1 className="text-2xl font-black text-amber-900 leading-none">同步码: {user.email}</h1>
               <div className={`w-3 h-3 rounded-full shadow-sm transition-colors ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'syncing' ? 'bg-blue-500 animate-pulse' : 'bg-red-500 animate-bounce'}`}></div>
             </div>
-            <p className={`text-[11px] font-bold mt-2 uppercase tracking-widest ${syncStatus === 'error' ? 'text-red-500' : 'text-slate-400'}`}>
-              {syncLog}
+            <p className={`text-[10px] font-bold mt-2 uppercase tracking-widest ${syncStatus === 'error' ? 'text-red-500' : 'text-slate-400'}`}>
+              {syncLog} • 上次: {lastSyncTime}
             </p>
           </div>
           <button onClick={() => performSync(true)} className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center active:scale-90 transition-all border border-amber-100 shadow-sm">
@@ -192,23 +212,25 @@ const App: React.FC = () => {
           <div className="space-y-4">
             {hens.length === 0 && (
               <div className="text-center py-20 bg-white/50 rounded-[40px] border-2 border-dashed border-amber-200">
-                <p className="text-slate-400 font-bold">请点击下方按钮添加母鸡</p>
+                <p className="text-slate-400 font-bold italic">云端正在获取数据，请稍候...</p>
               </div>
             )}
             {hens.map(h => {
               const hr = records.filter(r => r.henId === h.id && r.date === todayStr);
               return (
-                <div key={h.id} className="bg-white rounded-[32px] p-5 shadow-sm border border-white flex items-center">
+                <div key={h.id} className="bg-white rounded-[32px] p-5 shadow-sm border border-white flex items-center active:bg-amber-50 transition-colors">
                   <div className={`w-14 h-14 ${h.color} rounded-2xl flex items-center justify-center text-3xl shadow-inner`}>{h.avatar}</div>
                   <div className="ml-4 flex-1">
                     <h3 className="font-black text-slate-800">{h.name}</h3>
-                    <p className="text-[10px] text-slate-400 font-black">今日蛋量: <span className="text-amber-600 font-black text-base ml-1">{hr.length}</span></p>
+                    <p className="text-[10px] text-slate-400 font-black">今日已下: <span className="text-amber-600 font-black text-base ml-1">{hr.length} 个</span></p>
                   </div>
                   <button onClick={() => setRecordingForHen(h)} className="bg-amber-500 text-white w-12 h-12 rounded-2xl flex items-center justify-center active:scale-95 shadow-lg shadow-amber-100"><i className="fa-solid fa-plus"></i></button>
                 </div>
               );
             })}
-            <button onClick={() => setHens([...hens, { id: Math.random().toString(36).substr(2, 9), name: `母鸡${hens.length+1}`, color: AVAILABLE_COLORS[hens.length % 10], avatar: AVAILABLE_AVATARS[hens.length % 10] }])} className="w-full py-6 border-4 border-dotted border-amber-100 rounded-[32px] text-amber-400 font-black flex items-center justify-center gap-2">添加成员</button>
+            <button onClick={() => setHens([...hens, { id: Math.random().toString(36).substr(2, 9), name: `新母鸡`, color: AVAILABLE_COLORS[hens.length % 10], avatar: AVAILABLE_AVATARS[hens.length % 10] }])} className="w-full py-6 border-4 border-dotted border-amber-100 rounded-[32px] text-amber-400 font-black flex items-center justify-center gap-2">
+              <i className="fa-solid fa-plus-circle"></i> 增加成员
+            </button>
           </div>
         )}
 
@@ -236,25 +258,27 @@ const App: React.FC = () => {
         {activeTab === Tab.MANAGE && (
           <div className="space-y-4">
              <div className="bg-white p-8 rounded-[40px] shadow-sm border border-white text-center">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[4px] mb-4">云端同步设置</p>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[4px] mb-4">云端同步中心</p>
                 <div className="inline-block bg-amber-50 px-8 py-4 rounded-[32px] border-2 border-amber-100 text-3xl font-black text-amber-600 mb-6 tracking-widest">
                   {user.email}
                 </div>
                 
                 <div className="bg-slate-50 p-6 rounded-[32px] border border-slate-100 text-left mb-6">
-                  <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">同步控制</h4>
+                  <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 text-center">高级控制</h4>
                   <div className="grid grid-cols-2 gap-3">
-                    <button onClick={handleExport} className="bg-white border border-slate-200 text-slate-700 font-black py-4 rounded-2xl text-[11px] uppercase shadow-sm">复制备份</button>
-                    <button onClick={handleImport} className="bg-white border border-slate-200 text-slate-700 font-black py-4 rounded-2xl text-[11px] uppercase shadow-sm">导入合并</button>
+                    <button onClick={handleExport} className="bg-white border border-slate-200 text-slate-700 font-black py-4 rounded-2xl text-[11px] uppercase shadow-sm active:scale-95 transition-all">复制备份</button>
+                    <button onClick={handleImport} className="bg-white border border-slate-200 text-slate-700 font-black py-4 rounded-2xl text-[11px] uppercase shadow-sm active:scale-95 transition-all">导入恢复</button>
                   </div>
-                  <button onClick={() => performSync(true)} className="w-full mt-3 bg-amber-500 text-white font-black py-4 rounded-2xl text-[11px] uppercase shadow-lg shadow-amber-100">手动刷新云端</button>
+                  <button onClick={() => performSync(true)} className="w-full mt-3 bg-amber-500 text-white font-black py-4 rounded-2xl text-[11px] uppercase shadow-lg shadow-amber-100 active:scale-95">
+                    立即刷新并拉取最新
+                  </button>
                 </div>
 
-                <button onClick={handleLogout} className="text-slate-300 font-black py-2 text-[10px] uppercase tracking-widest">退出登录</button>
+                <button onClick={handleLogout} className="text-red-300 font-black py-2 text-[10px] uppercase tracking-widest active:text-red-500">退出当前设备</button>
              </div>
              
              <div className="bg-white p-6 rounded-[40px] shadow-sm border border-white">
-                <h3 className="font-black text-slate-800 text-xs mb-6 uppercase tracking-widest opacity-30 text-center">修改母鸡</h3>
+                <h3 className="font-black text-slate-800 text-xs mb-6 uppercase tracking-widest opacity-30 text-center">管理母鸡成员</h3>
                 <div className="space-y-3">
                   {hens.map(h => (
                     <div key={h.id} className="bg-slate-50 p-4 rounded-[24px] flex justify-between items-center">
@@ -262,7 +286,7 @@ const App: React.FC = () => {
                         <span className={`w-10 h-10 ${h.color} rounded-xl flex items-center justify-center text-xl`}>{h.avatar}</span>
                         <input className="bg-transparent font-black text-slate-700 text-sm outline-none w-24" value={h.name} onChange={e => setHens(hens.map(x => x.id === h.id ? {...x, name: e.target.value} : x))} />
                       </div>
-                      <button onClick={() => confirm('确认删除？') && setHens(hens.filter(x => x.id !== h.id))} className="text-slate-200 hover:text-red-400"><i className="fa-solid fa-circle-xmark"></i></button>
+                      <button onClick={() => confirm('确认删除该母鸡及所有相关记录？') && setHens(hens.filter(x => x.id !== h.id))} className="text-slate-200 hover:text-red-400 transition-colors"><i className="fa-solid fa-circle-xmark"></i></button>
                     </div>
                   ))}
                 </div>
@@ -274,12 +298,12 @@ const App: React.FC = () => {
           <div className="space-y-4">
              <div className="bg-gradient-to-br from-amber-400 to-orange-500 p-8 rounded-[40px] text-white shadow-xl shadow-orange-200">
                 <h2 className="text-2xl font-black mb-2">养鸡 AI 顾问</h2>
-                <button onClick={async () => { setIsLoadingAdvice(true); setAiAdvice(await getHenAdvice(records, hens) || ''); setIsLoadingAdvice(false); }} disabled={isLoadingAdvice} className="w-full bg-white text-orange-600 font-black py-5 rounded-[28px] mt-6 shadow-md">
-                  {isLoadingAdvice ? '正在分析数据...' : '获取喂养报告'}
+                <button onClick={async () => { setIsLoadingAdvice(true); setAiAdvice(await getHenAdvice(records, hens) || ''); setIsLoadingAdvice(false); }} disabled={isLoadingAdvice} className="w-full bg-white text-orange-600 font-black py-5 rounded-[28px] mt-6 shadow-md transition-all active:translate-y-1">
+                  {isLoadingAdvice ? '正在深入鸡舍...' : '获取喂养报告'}
                 </button>
              </div>
              <div className="bg-white p-8 rounded-[40px] border border-white shadow-sm min-h-[200px]">
-               {aiAdvice ? <div className="text-slate-600 text-sm leading-relaxed font-bold">{aiAdvice}</div> : <div className="text-slate-300 text-center py-10 italic">分析报告将在这里显示</div>}
+               {aiAdvice ? <div className="text-slate-600 text-sm leading-relaxed font-bold">{aiAdvice}</div> : <div className="text-slate-300 text-center py-10 italic font-medium">分析报告将在这里显示</div>}
              </div>
           </div>
         )}
@@ -289,7 +313,7 @@ const App: React.FC = () => {
         {[
           { tab: Tab.TRACK, icon: 'fa-egg', label: '记录' },
           { tab: Tab.STATS, icon: 'fa-chart-simple', label: '走势' },
-          { tab: Tab.MANAGE, icon: 'fa-cloud', label: '云端' },
+          { tab: Tab.MANAGE, icon: 'fa-cloud', label: '同步' },
           { tab: Tab.TIPS, icon: 'fa-magic', label: '专家' }
         ].map(item => (
           <button key={item.tab} onClick={() => setActiveTab(item.tab as Tab)} className={`flex flex-col items-center gap-1 transition-all ${activeTab === item.tab ? 'text-amber-400 scale-125' : 'text-slate-500'}`}>
