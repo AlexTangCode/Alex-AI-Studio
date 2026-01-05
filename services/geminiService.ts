@@ -3,7 +3,8 @@ import { GoogleGenAI } from "@google/genai";
 import { EggRecord, Hen } from "../types";
 
 export const getHenAdvice = async (records: EggRecord[], hens: Hen[]) => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+  // Use recommended initialization with process.env.API_KEY
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   // Prepare a more detailed summary for AI
   const recentRecords = records.slice(-30);
@@ -32,6 +33,7 @@ export const getHenAdvice = async (records: EggRecord[], hens: Hen[]) => {
       model: "gemini-3-flash-preview",
       contents: prompt,
     });
+    // Use .text property directly
     return response.text;
   } catch (error) {
     console.error("Gemini API Error:", error);

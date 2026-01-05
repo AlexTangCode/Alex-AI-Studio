@@ -3,12 +3,13 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Hen, EggRecord, Tab, StatPeriod, User, SyncStatus } from './types';
 import { STORAGE_KEY, AVAILABLE_AVATARS, AVAILABLE_COLORS } from './constants';
 import { 
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell
 } from 'recharts';
 import { getHenAdvice } from './services/geminiService';
 import { pushToCloud, pullFromCloud, encodeData, decodeData } from './services/syncService';
 import WeightModal from './components/WeightModal';
 import AuthModal from './components/AuthModal';
+import HenCard from './components/HenCard';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(() => {
@@ -32,17 +33,26 @@ const App: React.FC = () => {
   const lastSyncFingerprintRef = useRef('');
   const [recordingForHen, setRecordingForHen] = useState<Hen | null>(null);
 
-  // 计算当前数据的指纹，用于判断是否需要上传
   const currentFingerprint = useMemo(() => {
-    return `v1_${hens.length}_${records.length}_${records.slice(-1)[0]?.id || ''}`;
+    return `v4_${hens.length}_${records.length}_${records.slice(-1)[0]?.id || ''}`;
   }, [hens, records]);
 
+  // Handle local persistence
   useEffect(() => {
     const sh = localStorage.getItem(STORAGE_KEY + '_hens');
     const sr = localStorage.getItem(STORAGE_KEY + '_records');
     if (sh) setHens(JSON.parse(sh));
     if (sr) setRecords(JSON.parse(sr));
   }, []);
+
+  useEffect(() => {
+    if (hens.length > 0) localStorage.setItem(STORAGE_KEY + '_hens', JSON.stringify(hens));
+    localStorage.setItem(STORAGE_KEY + '_records', JSON.stringify(records));
+  }, [hens, records]);
+
+  useEffect(() => {
+    if (user) localStorage.setItem(STORAGE_KEY + '_user', JSON.stringify(user));
+  }, [user]);
 
   const addLog = (msg: string, isError = false) => {
     setSyncLog(msg);
@@ -52,16 +62,14 @@ const App: React.FC = () => {
 
   const mergeData = useCallback((remote: any) => {
     if (!remote || remote.isNewUser) return;
-    
-    // 如果云端没有任何记录，不要合并
     if (!remote.hens?.length && !remote.records?.length) return;
 
     setHens(prev => {
-      const merged = [...prev];
+      const localMap = new Map(prev.map(h => [h.id, h]));
       (remote.hens || []).forEach((rh: Hen) => {
-        if (!merged.find(lh => lh.id === rh.id)) merged.push(rh);
+        localMap.set(rh.id, rh);
       });
-      return merged;
+      return Array.from(localMap.values());
     });
 
     setRecords(prev => {
@@ -79,27 +87,29 @@ const App: React.FC = () => {
     if (!user || isSyncingRef.current) return;
     isSyncingRef.current = true;
     setSyncStatus('syncing');
-    
+    if (isManual) addLog('正在尝试同步...');
+
     try {
       const remote = await pullFromCloud(user.cloudId);
       
       if (remote && remote.isNewUser) {
-        // 只有本地有数据时才初始化云端，防止新设备反向覆盖旧数据
-        if (hens.length > 0 || records.length > 0) {
-          addLog('正在初始化云端...');
+        if (hens.length > 0) {
+          addLog('同步中...');
           await pushToCloud(user.cloudId, { hens, records });
-          addLog('云端初始化成功');
+          addLog('云端已更新');
         } else {
           addLog('云端暂无数据');
         }
       } else if (remote) {
-        // 核心：对比指纹和记录数。如果本地为空而云端有，则强制拉取
-        const remoteFingerprint = `v1_${remote.hens?.length}_${remote.records?.length}_${remote.records?.slice(-1)[0]?.id || ''}`;
-        
+        const remoteFingerprint = `v4_${remote.hens?.length}_${remote.records?.length}_${remote.records?.slice(-1)[0]?.id || ''}`;
         if (remoteFingerprint !== currentFingerprint || hens.length === 0) {
           mergeData(remote);
           lastSyncFingerprintRef.current = remoteFingerprint;
           addLog('同步完成');
+        } else if (currentFingerprint !== lastSyncFingerprintRef.current) {
+          await pushToCloud(user.cloudId, { hens, records });
+          addLog('云端已同步');
+          lastSyncFingerprintRef.current = currentFingerprint;
         } else {
           addLog('已是最新');
         }
@@ -108,148 +118,145 @@ const App: React.FC = () => {
       setSyncStatus('synced');
       setLastSyncTime(new Date().toLocaleTimeString());
     } catch (err: any) {
-      addLog('连接失败，请检查网络', true);
+      addLog('同步异常', true);
     } finally {
       isSyncingRef.current = false;
     }
   }, [user, currentFingerprint, hens, records, mergeData]);
 
-  const uploadData = useCallback(async () => {
-    if (!user || !isInitialPullDone || isSyncingRef.current) return;
-    // 如果指纹没变，不需要上传
-    if (currentFingerprint === lastSyncFingerprintRef.current) return;
-
-    isSyncingRef.current = true;
-    setSyncStatus('syncing');
-    try {
-      await pushToCloud(user.cloudId, { hens, records });
-      lastSyncFingerprintRef.current = currentFingerprint;
-      addLog('已安全存入云端');
-      setSyncStatus('synced');
-      setLastSyncTime(new Date().toLocaleTimeString());
-    } catch (err: any) {
-      addLog('写入失败，稍后重试', true);
-    } finally {
-      isSyncingRef.current = false;
-    }
-  }, [user, hens, records, isInitialPullDone, currentFingerprint]);
-
   useEffect(() => {
-    if (user) {
+    if (user && !isInitialPullDone) {
       performSync();
-      const timer = setInterval(() => performSync(), 60000);
-      return () => clearInterval(timer);
     }
-  }, [user, performSync]);
+  }, [user, isInitialPullDone, performSync]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY + '_hens', JSON.stringify(hens));
-    localStorage.setItem(STORAGE_KEY + '_records', JSON.stringify(records));
-    // 延迟 2 秒上传，防止频繁写
-    const timer = setTimeout(() => uploadData(), 2000);
-    return () => clearTimeout(timer);
-  }, [hens, records, uploadData]);
-
-  const handleExport = () => {
-    const code = encodeData({ hens, records });
-    const input = document.createElement('textarea');
-    input.value = code; document.body.appendChild(input);
-    input.select(); document.execCommand('copy');
-    document.body.removeChild(input);
-    alert('备份代码已复制！');
+  const saveEggRecord = (date: string, weight?: number) => {
+    if (!recordingForHen) return;
+    const newRecord: EggRecord = {
+      id: `egg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      henId: recordingForHen.id,
+      date,
+      timestamp: new Date(date).getTime(),
+      weight
+    };
+    setRecords(prev => [...prev, newRecord].sort((a, b) => a.timestamp - b.timestamp));
+    setRecordingForHen(null);
   };
 
-  const handleImport = () => {
-    const code = prompt('请粘贴备份代码：');
-    if (code) {
-      const data = decodeData(code);
-      if (data) { mergeData(data); alert('导入成功！'); }
-      else alert('代码错误。');
-    }
-  };
-
-  const handleLogin = (u: User) => { setUser(u); setIsInitialPullDone(false); localStorage.setItem(STORAGE_KEY + '_user', JSON.stringify(u)); };
-  const handleLogout = () => confirm('退出前请确保数据已同步。确定吗？') && (localStorage.clear(), window.location.reload());
-
-  const todayStr = new Date().toISOString().split('T')[0];
   const statsData = useMemo(() => {
     const days = statPeriod === StatPeriod.WEEK ? 7 : 30;
-    const res = [];
+    const now = new Date();
+    const data = [];
     for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i);
-      const ds = d.toISOString().split('T')[0];
-      const dr = records.filter(r => r.date === ds);
-      const row: any = { name: ds.slice(5) };
-      hens.forEach(h => row[h.name] = dr.filter(r => r.henId === h.id).length);
-      res.push(row);
+      const d = new Date();
+      d.setDate(now.getDate() - i);
+      const dateStr = d.toISOString().split('T')[0];
+      const count = records.filter(r => r.date === dateStr).length;
+      data.push({ name: dateStr.split('-').slice(1).join('/'), count });
     }
-    return res;
-  }, [records, hens, statPeriod]);
+    return data;
+  }, [records, statPeriod]);
 
-  if (!user) return <AuthModal onLogin={handleLogin} />;
+  const fetchAdvice = async () => {
+    setIsLoadingAdvice(true);
+    const advice = await getHenAdvice(records, hens);
+    setAiAdvice(advice || "AI 忙碌中，请稍后再试。");
+    setIsLoadingAdvice(false);
+  };
+
+  if (!user) {
+    return <AuthModal onLogin={setUser} />;
+  }
 
   return (
-    <div className="max-w-md mx-auto min-h-screen pb-24 flex flex-col bg-amber-50/50">
-      <header className="pt-14 px-6 pb-6 bg-white shadow-sm rounded-b-[40px] mb-6 border-b border-amber-100 sticky top-0 z-40">
-        <div className="flex justify-between items-center">
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-black text-amber-900 leading-none">同步码: {user.email}</h1>
-              <div className={`w-3 h-3 rounded-full shadow-sm transition-colors ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'syncing' ? 'bg-blue-500 animate-pulse' : 'bg-red-500 animate-bounce'}`}></div>
-            </div>
-            <p className={`text-[10px] font-bold mt-2 uppercase tracking-widest ${syncStatus === 'error' ? 'text-red-500' : 'text-slate-400'}`}>
-              {syncLog} • 上次: {lastSyncTime}
-            </p>
+    <div className="min-h-screen bg-slate-50 pb-24">
+      {/* Header */}
+      <div className="bg-white px-6 py-4 flex items-center justify-between shadow-sm sticky top-0 z-50">
+        <div>
+          <h1 className="text-xl font-black text-slate-800">快乐鸡舍 🐔</h1>
+          <div className="flex items-center gap-2 mt-0.5">
+            <div className={`w-2 h-2 rounded-full ${syncStatus === 'syncing' ? 'bg-blue-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-400' : 'bg-green-400'}`}></div>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{syncLog} · {lastSyncTime}</span>
           </div>
-          <button onClick={() => performSync(true)} className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center active:scale-90 transition-all border border-amber-100 shadow-sm">
-            <i className={`fa-solid fa-sync ${syncStatus === 'syncing' ? 'animate-spin' : ''}`}></i>
-          </button>
         </div>
-      </header>
+        <button onClick={() => performSync(true)} className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-500 active:rotate-180 transition-all duration-500">
+          <i className="fa-solid fa-arrows-rotate"></i>
+        </button>
+      </div>
 
-      <main className="flex-1 px-4">
+      <main className="p-6">
         {activeTab === Tab.TRACK && (
-          <div className="space-y-4">
+          <div className="grid gap-4">
             {hens.length === 0 && (
-              <div className="text-center py-20 bg-white/50 rounded-[40px] border-2 border-dashed border-amber-200">
-                <p className="text-slate-400 font-bold italic">云端正在获取数据，请稍候...</p>
+              <div className="bg-white rounded-3xl p-10 text-center border-2 border-dashed border-slate-200">
+                <p className="text-slate-400 font-bold">还没有母鸡，去管理页面添加吧！</p>
               </div>
             )}
-            {hens.map(h => {
-              const hr = records.filter(r => r.henId === h.id && r.date === todayStr);
-              return (
-                <div key={h.id} className="bg-white rounded-[32px] p-5 shadow-sm border border-white flex items-center active:bg-amber-50 transition-colors">
-                  <div className={`w-14 h-14 ${h.color} rounded-2xl flex items-center justify-center text-3xl shadow-inner`}>{h.avatar}</div>
-                  <div className="ml-4 flex-1">
-                    <h3 className="font-black text-slate-800">{h.name}</h3>
-                    <p className="text-[10px] text-slate-400 font-black">今日已下: <span className="text-amber-600 font-black text-base ml-1">{hr.length} 个</span></p>
-                  </div>
-                  <button onClick={() => setRecordingForHen(h)} className="bg-amber-500 text-white w-12 h-12 rounded-2xl flex items-center justify-center active:scale-95 shadow-lg shadow-amber-100"><i className="fa-solid fa-plus"></i></button>
-                </div>
-              );
-            })}
-            <button onClick={() => setHens([...hens, { id: Math.random().toString(36).substr(2, 9), name: `新母鸡`, color: AVAILABLE_COLORS[hens.length % 10], avatar: AVAILABLE_AVATARS[hens.length % 10] }])} className="w-full py-6 border-4 border-dotted border-amber-100 rounded-[32px] text-amber-400 font-black flex items-center justify-center gap-2">
-              <i className="fa-solid fa-plus-circle"></i> 增加成员
-            </button>
+            {hens.map(hen => (
+              <HenCard 
+                key={hen.id} 
+                hen={hen} 
+                todayCount={records.filter(r => r.henId === hen.id && r.date === new Date().toISOString().split('T')[0]).length}
+                onAdd={(count) => {
+                  if (count > 0) setRecordingForHen(hen);
+                  else {
+                    const todayRecords = records.filter(r => r.henId === hen.id && r.date === new Date().toISOString().split('T')[0]);
+                    if (todayRecords.length > 0) {
+                      const lastId = todayRecords[todayRecords.length - 1].id;
+                      setRecords(prev => prev.filter(r => r.id !== lastId));
+                    }
+                  }
+                }}
+              />
+            ))}
           </div>
         )}
 
         {activeTab === Tab.STATS && (
-           <div className="space-y-4">
-            <div className="bg-white p-6 rounded-[40px] shadow-sm border border-white">
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="font-black text-slate-800">产量走势</h3>
-                <button onClick={() => setStatPeriod(statPeriod === StatPeriod.WEEK ? StatPeriod.MONTH : StatPeriod.WEEK)} className="text-[10px] font-black bg-amber-50 text-amber-600 px-4 py-2 rounded-xl border border-amber-100">
-                  {statPeriod === StatPeriod.WEEK ? '近7天' : '近30天'}
-                </button>
+          <div className="space-y-6">
+            <div className="bg-white rounded-3xl p-6 shadow-sm border border-amber-100">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="font-black text-slate-800">产蛋量趋势</h3>
+                <div className="flex bg-slate-100 p-1 rounded-xl">
+                  {[StatPeriod.WEEK, StatPeriod.MONTH].map(p => (
+                    <button 
+                      key={p}
+                      onClick={() => setStatPeriod(p)}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${statPeriod === p ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-400'}`}
+                    >
+                      {p === StatPeriod.WEEK ? '周' : '月'}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="h-48 w-full">
-                <ResponsiveContainer>
+                <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={statsData}>
-                    <Tooltip cursor={{fill: '#fff7ed', radius: 12}} contentStyle={{borderRadius: '24px', border: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.05)'}} />
-                    {hens.map((h, i) => <Bar key={h.id} dataKey={h.name} stackId="a" fill={i === 0 ? '#f59e0b' : '#fbbf24'} radius={i === hens.length - 1 ? [6, 6, 0, 0] : [0, 0, 0, 0]} />)}
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fontWeight: 'bold', fill: '#cbd5e1'}} />
+                    <Tooltip contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'}} />
+                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                      {statsData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#f59e0b' : '#f1f5f9'} />
+                      ))}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 rounded-3xl p-6 border border-amber-100">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-black text-amber-900">AI 养鸡助理</h3>
+                <button 
+                  onClick={fetchAdvice}
+                  disabled={isLoadingAdvice}
+                  className="bg-white text-amber-600 text-xs font-bold px-4 py-2 rounded-xl shadow-sm active:scale-95 disabled:opacity-50"
+                >
+                  {isLoadingAdvice ? '思考中...' : '获取建议'}
+                </button>
+              </div>
+              <div className="text-amber-800 text-sm leading-relaxed whitespace-pre-wrap">
+                {aiAdvice || "点击上方按钮，让 AI 分析目前的产蛋数据并提供专业建议。"}
               </div>
             </div>
           </div>
@@ -257,79 +264,69 @@ const App: React.FC = () => {
 
         {activeTab === Tab.MANAGE && (
           <div className="space-y-4">
-             <div className="bg-white p-8 rounded-[40px] shadow-sm border border-white text-center">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[4px] mb-4">云端同步中心</p>
-                <div className="inline-block bg-amber-50 px-8 py-4 rounded-[32px] border-2 border-amber-100 text-3xl font-black text-amber-600 mb-6 tracking-widest">
-                  {user.email}
-                </div>
-                
-                <div className="bg-slate-50 p-6 rounded-[32px] border border-slate-100 text-left mb-6">
-                  <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 text-center">高级控制</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button onClick={handleExport} className="bg-white border border-slate-200 text-slate-700 font-black py-4 rounded-2xl text-[11px] uppercase shadow-sm active:scale-95 transition-all">复制备份</button>
-                    <button onClick={handleImport} className="bg-white border border-slate-200 text-slate-700 font-black py-4 rounded-2xl text-[11px] uppercase shadow-sm active:scale-95 transition-all">导入恢复</button>
-                  </div>
-                  <button onClick={() => performSync(true)} className="w-full mt-3 bg-amber-500 text-white font-black py-4 rounded-2xl text-[11px] uppercase shadow-lg shadow-amber-100 active:scale-95">
-                    立即刷新并拉取最新
-                  </button>
-                </div>
-
-                <button onClick={handleLogout} className="text-red-300 font-black py-2 text-[10px] uppercase tracking-widest active:text-red-500">退出当前设备</button>
-             </div>
-             
-             <div className="bg-white p-6 rounded-[40px] shadow-sm border border-white">
-                <h3 className="font-black text-slate-800 text-xs mb-6 uppercase tracking-widest opacity-30 text-center">管理母鸡成员</h3>
-                <div className="space-y-3">
-                  {hens.map(h => (
-                    <div key={h.id} className="bg-slate-50 p-4 rounded-[24px] flex justify-between items-center">
-                      <div className="flex items-center gap-3">
-                        <span className={`w-10 h-10 ${h.color} rounded-xl flex items-center justify-center text-xl`}>{h.avatar}</span>
-                        <input className="bg-transparent font-black text-slate-700 text-sm outline-none w-24" value={h.name} onChange={e => setHens(hens.map(x => x.id === h.id ? {...x, name: e.target.value} : x))} />
-                      </div>
-                      <button onClick={() => confirm('确认删除该母鸡及所有相关记录？') && setHens(hens.filter(x => x.id !== h.id))} className="text-slate-200 hover:text-red-400 transition-colors"><i className="fa-solid fa-circle-xmark"></i></button>
+            <div className="bg-white rounded-3xl p-6 shadow-sm border border-amber-100">
+              <h3 className="font-black text-slate-800 mb-4">鸡群管理</h3>
+              <div className="space-y-3">
+                {hens.map(hen => (
+                  <div key={hen.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 ${hen.color} rounded-full flex items-center justify-center text-xl`}>{hen.avatar}</div>
+                      <span className="font-bold text-slate-700">{hen.name}</span>
                     </div>
-                  ))}
-                </div>
-             </div>
-          </div>
-        )}
-
-        {activeTab === Tab.TIPS && (
-          <div className="space-y-4">
-             <div className="bg-gradient-to-br from-amber-400 to-orange-500 p-8 rounded-[40px] text-white shadow-xl shadow-orange-200">
-                <h2 className="text-2xl font-black mb-2">养鸡 AI 顾问</h2>
-                <button onClick={async () => { setIsLoadingAdvice(true); setAiAdvice(await getHenAdvice(records, hens) || ''); setIsLoadingAdvice(false); }} disabled={isLoadingAdvice} className="w-full bg-white text-orange-600 font-black py-5 rounded-[28px] mt-6 shadow-md transition-all active:translate-y-1">
-                  {isLoadingAdvice ? '正在深入鸡舍...' : '获取喂养报告'}
+                    <button 
+                      onClick={() => setHens(prev => prev.filter(h => h.id !== hen.id))}
+                      className="text-red-400 p-2"
+                    >
+                      <i className="fa-solid fa-trash-can"></i>
+                    </button>
+                  </div>
+                ))}
+                <button 
+                  onClick={() => {
+                    const name = prompt('母鸡名字?');
+                    if (name) {
+                      const newHen: Hen = {
+                        id: `hen-${Date.now()}`,
+                        name,
+                        color: AVAILABLE_COLORS[Math.floor(Math.random() * AVAILABLE_COLORS.length)],
+                        avatar: AVAILABLE_AVATARS[Math.floor(Math.random() * AVAILABLE_AVATARS.length)]
+                      };
+                      setHens(prev => [...prev, newHen]);
+                    }
+                  }}
+                  className="w-full py-4 border-2 border-dashed border-amber-200 rounded-2xl text-amber-600 font-bold flex items-center justify-center gap-2"
+                >
+                  <i className="fa-solid fa-plus"></i> 添加母鸡
                 </button>
-             </div>
-             <div className="bg-white p-8 rounded-[40px] border border-white shadow-sm min-h-[200px]">
-               {aiAdvice ? <div className="text-slate-600 text-sm leading-relaxed font-bold">{aiAdvice}</div> : <div className="text-slate-300 text-center py-10 italic font-medium">分析报告将在这里显示</div>}
-             </div>
+              </div>
+            </div>
           </div>
         )}
       </main>
 
-      <nav className="fixed bottom-6 left-6 right-6 max-w-[calc(448px-3rem)] mx-auto bg-slate-900/90 backdrop-blur-xl rounded-[32px] px-8 py-5 flex justify-between items-center shadow-2xl z-50">
+      {/* Navigation */}
+      <nav className="fixed bottom-6 left-6 right-6 bg-slate-900 rounded-[32px] p-2 flex items-center justify-around shadow-2xl z-50">
         {[
           { tab: Tab.TRACK, icon: 'fa-egg', label: '记录' },
-          { tab: Tab.STATS, icon: 'fa-chart-simple', label: '走势' },
-          { tab: Tab.MANAGE, icon: 'fa-cloud', label: '同步' },
-          { tab: Tab.TIPS, icon: 'fa-magic', label: '专家' }
+          { tab: Tab.STATS, icon: 'fa-chart-simple', label: '数据' },
+          { tab: Tab.MANAGE, icon: 'fa-kiwi-bird', label: '管理' }
         ].map(item => (
-          <button key={item.tab} onClick={() => setActiveTab(item.tab as Tab)} className={`flex flex-col items-center gap-1 transition-all ${activeTab === item.tab ? 'text-amber-400 scale-125' : 'text-slate-500'}`}>
-            <i className={`fa-solid ${item.icon} text-xl`}></i><span className="text-[8px] font-black uppercase">{item.label}</span>
+          <button 
+            key={item.tab}
+            onClick={() => setActiveTab(item.tab)}
+            className={`flex-1 flex flex-col items-center py-2 transition-all ${activeTab === item.tab ? 'text-amber-400 scale-110' : 'text-slate-500'}`}
+          >
+            <i className={`fa-solid ${item.icon} text-lg mb-1`}></i>
+            <span className="text-[10px] font-black uppercase tracking-tighter">{item.label}</span>
           </button>
         ))}
       </nav>
 
       {recordingForHen && (
         <WeightModal 
-          henName={recordingForHen.name} 
-          onSave={(d, w) => {
-            setRecords(prev => [...prev, { id: Math.random().toString(36).substr(2, 9), henId: recordingForHen.id, date: d, timestamp: Date.now(), weight: w }]);
-            setRecordingForHen(null);
-          }} 
-          onCancel={() => setRecordingForHen(null)} 
+          henName={recordingForHen.name}
+          onSave={saveEggRecord}
+          onCancel={() => setRecordingForHen(null)}
         />
       )}
     </div>

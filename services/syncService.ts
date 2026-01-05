@@ -1,30 +1,25 @@
 
 /**
- * 自动同步服务 - 终极兼容版
- * 解决移动端“显示成功但实际未写入”的问题
+ * 自动同步服务 - 深度兼容多方案版
+ * 集成了多套同步后端，防止单一域名被拦截
  */
 
-// 换用一个全新的专用 Bucket，确保环境干净
-const BUCKET_ID = 'hb_v3_9a8b7c6d5e4f3a2b1'; 
-const API_BASE = `https://kvdb.io/${BUCKET_ID}`;
+// 方案 A: Pantry Cloud (稳定、支持跨域)
+const PANTRY_ID = '08b4998e-4903-455b-9d66-5089e8236683';
+const PANTRY_BASE = `https://getpantry.cloud/apiv1/pantry/${PANTRY_ID}/basket`;
 
-/**
- * 带有深度校验的 fetch
- */
-const fetchSafe = async (url: string, options: any) => {
+// 方案 B: KeyValue.xyz (备用，极简)
+const KV_BASE = `https://api.keyvalue.xyz`;
+
+const fetchWithTimeout = async (url: string, options: any, timeout = 7000) => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000);
-  
+  const id = setTimeout(() => controller.abort(), timeout);
   try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      cache: 'no-cache', // 强制跳过浏览器缓存
-    });
-    clearTimeout(timeoutId);
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(id);
     return response;
   } catch (err) {
-    clearTimeout(timeoutId);
+    clearTimeout(id);
     throw err;
   }
 };
@@ -33,49 +28,55 @@ export const pushToCloud = async (cloudId: string, data: any) => {
   const payload = JSON.stringify({
     hens: data.hens || [],
     records: data.records || [],
-    lastUpdated: Date.now()
+    lastUpdated: Date.now(),
+    ver: '4.0'
   });
-  
+
+  // 尝试 Pantry (主方案)
   try {
-    // 1. 发送保存请求 (使用 POST + text/plain 绕过所有 CORS 预检)
-    const res = await fetchSafe(`${API_BASE}/${cloudId}`, {
+    const res = await fetchWithTimeout(`${PANTRY_BASE}/${cloudId}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain' }, 
+      headers: { 'Content-Type': 'application/json' },
       body: payload,
     });
-    
-    if (!res.ok) throw new Error('写入失败');
+    if (res.ok) return true;
+  } catch (e) {
+    console.warn("Pantry failed, trying fallback...");
+  }
 
-    // 2. 写后读校验：立即重新读取，确保数据真的进去了
-    const verifyRes = await fetchSafe(`${API_BASE}/${cloudId}`, { method: 'GET' });
-    const verifyText = await verifyRes.text();
-    
-    // 如果读取到的数据为空或者与发出的不一致，说明写入失败
-    if (!verifyText || verifyText.length < 10) {
-      throw new Error('验证失败：云端未接收到数据');
-    }
-    
-    return true;
-  } catch (err: any) {
-    console.error("Sync Critical Error:", err);
-    throw new Error(err.message || '网络异常');
+  // 尝试 KeyValue.xyz (备选方案)
+  try {
+    const res = await fetchWithTimeout(`${KV_BASE}/${cloudId}/hens_app`, {
+      method: 'POST',
+      body: payload,
+    });
+    return res.ok;
+  } catch (e) {
+    throw new Error('网络连接受限');
   }
 };
 
 export const pullFromCloud = async (cloudId: string) => {
+  // 尝试从 Pantry 读取
   try {
-    const response = await fetchSafe(`${API_BASE}/${cloudId}`, { method: 'GET' });
-    
-    if (response.status === 404) return { isNewUser: true };
-    
-    const text = await response.text();
-    if (!text || text.trim() === "") return { isNewUser: true };
-    
-    return JSON.parse(text);
-  } catch (err: any) {
-    console.error("Pull Error:", err);
-    throw new Error('云端无法访问');
+    const res = await fetchWithTimeout(`${PANTRY_BASE}/${cloudId}`, { method: 'GET' });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.warn("Pantry pull failed, trying fallback...");
   }
+
+  // 尝试从 KeyValue.xyz 读取
+  try {
+    const res = await fetchWithTimeout(`${KV_BASE}/${cloudId}/hens_app`, { method: 'GET' });
+    if (res.ok) {
+      const text = await res.text();
+      return text ? JSON.parse(text) : { isNewUser: true };
+    }
+  } catch (e) {}
+
+  return { isNewUser: true };
 };
 
 export const encodeData = (data: any) => {
