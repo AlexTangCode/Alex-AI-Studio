@@ -1,82 +1,67 @@
 
 /**
- * 自动同步服务 - 深度兼容多方案版
- * 集成了多套同步后端，防止单一域名被拦截
+ * 增强型同步服务 - 针对移动端优化
  */
 
-// 方案 A: Pantry Cloud (稳定、支持跨域)
 const PANTRY_ID = '08b4998e-4903-455b-9d66-5089e8236683';
 const PANTRY_BASE = `https://getpantry.cloud/apiv1/pantry/${PANTRY_ID}/basket`;
 
-// 方案 B: KeyValue.xyz (备用，极简)
-const KV_BASE = `https://api.keyvalue.xyz`;
-
-const fetchWithTimeout = async (url: string, options: any, timeout = 7000) => {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return response;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
+const fetchWithRetry = async (url: string, options: any, retries = 2) => {
+  for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      if (response.ok || response.status === 404) return response;
+      if (i === retries) throw new Error(`HTTP Error ${response.status}`);
+    } catch (err: any) {
+      clearTimeout(timeout);
+      if (i === retries) throw err;
+      // 指数退避
+      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)));
+    }
   }
+  throw new Error('网络请求失败');
 };
 
 export const pushToCloud = async (cloudId: string, data: any) => {
   const payload = JSON.stringify({
     hens: data.hens || [],
     records: data.records || [],
-    lastUpdated: Date.now(),
-    ver: '4.0'
+    lastUpdated: Date.now()
   });
 
-  // 尝试 Pantry (主方案)
   try {
-    const res = await fetchWithTimeout(`${PANTRY_BASE}/${cloudId}`, {
+    const res = await fetchWithRetry(`${PANTRY_BASE}/${cloudId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: payload,
     });
-    if (res.ok) return true;
-  } catch (e) {
-    console.warn("Pantry failed, trying fallback...");
-  }
-
-  // 尝试 KeyValue.xyz (备选方案)
-  try {
-    const res = await fetchWithTimeout(`${KV_BASE}/${cloudId}/hens_app`, {
-      method: 'POST',
-      body: payload,
-    });
     return res.ok;
   } catch (e) {
-    throw new Error('网络连接受限');
+    console.error("Sync Error:", e);
+    throw new Error('同步失败，请稍后重试');
   }
 };
 
 export const pullFromCloud = async (cloudId: string) => {
-  // 尝试从 Pantry 读取
   try {
-    const res = await fetchWithTimeout(`${PANTRY_BASE}/${cloudId}`, { method: 'GET' });
-    if (res.ok) {
-      return await res.json();
-    }
+    // 添加时间戳防止某些手机浏览器缓存 404
+    const t = Date.now();
+    const res = await fetchWithRetry(`${PANTRY_BASE}/${cloudId}?t=${t}`, { 
+      method: 'GET',
+      headers: { 'Cache-Control': 'no-cache' }
+    });
+    
+    if (res.status === 404) return { isNewUser: true };
+    
+    return await res.json();
   } catch (e) {
-    console.warn("Pantry pull failed, trying fallback...");
+    console.warn("Pulling cloud data failed:", e);
+    // 网络错误不应标记为新用户，应让调用者知道是异常
+    throw e;
   }
-
-  // 尝试从 KeyValue.xyz 读取
-  try {
-    const res = await fetchWithTimeout(`${KV_BASE}/${cloudId}/hens_app`, { method: 'GET' });
-    if (res.ok) {
-      const text = await res.text();
-      return text ? JSON.parse(text) : { isNewUser: true };
-    }
-  } catch (e) {}
-
-  return { isNewUser: true };
 };
 
 export const encodeData = (data: any) => {
