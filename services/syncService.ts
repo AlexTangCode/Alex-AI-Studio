@@ -1,79 +1,81 @@
 
 /**
- * 自动同步服务 - Pantry Cloud 稳定版
- * 使用标准 POST 请求，解决移动端 PUT 请求被拦截的问题
+ * 自动同步服务 - 深度兼容版
+ * 采用“简单请求”策略，绕过移动端防火墙对 API 的拦截
  */
 
-// 这是为本应用分配的独立 Pantry ID
-const PANTRY_ID = '08b4998e-4903-455b-9d66-5089e8236683';
-const API_BASE = `https://getpantry.cloud/apiv1/pantry/${PANTRY_ID}/basket`;
+// 使用一个全新的、符合标准的 20 位 16 进制 Bucket ID
+const BUCKET_ID = '7f9b8c2d1e0a4f5b6c7d'; 
+const API_BASE = `https://kvdb.io/${BUCKET_ID}`;
 
 /**
- * 带有超时控制的 fetch
+ * 带有超时和异常处理的 fetch
  */
-const fetchWithTimeout = async (url: string, options: any, timeout = 8000) => {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return response;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
+const fetchWithRetry = async (url: string, options: any, retries = 2) => {
+  for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        // 关键：使用 no-cache 确保每次都从服务器获取最新数据
+        cache: 'no-store',
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status}`);
+      return response;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (i === retries) throw err;
+      // 等待 1 秒后重试
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
+  throw new Error('网络请求失败');
 };
 
 export const pushToCloud = async (cloudId: string, data: any) => {
   const payload = JSON.stringify({
     hens: data.hens || [],
     records: data.records || [],
-    lastUpdated: Date.now(),
-    client: 'mobile_hen_helper'
+    lastUpdated: Date.now()
   });
   
   try {
-    // Pantry 使用 POST 创建或更新 Basket，这是移动端最稳定的请求方式
-    const response = await fetchWithTimeout(`${API_BASE}/${cloudId}`, {
+    // 关键修复：使用 text/plain 避免触发 OPTIONS 预检请求（Simple Request 模式）
+    await fetchWithRetry(`${API_BASE}/${cloudId}`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'text/plain', 
       },
       body: payload,
     });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
     return true;
   } catch (err: any) {
-    console.error("Cloud Save Error:", err);
-    throw new Error(err.name === 'AbortError' ? '同步超时' : '云端拒绝连接');
+    console.error("Cloud Push Failed:", err);
+    throw new Error('云端写入失败，请检查联网');
   }
 };
 
 export const pullFromCloud = async (cloudId: string) => {
   try {
-    const response = await fetchWithTimeout(`${API_BASE}/${cloudId}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      }
+    const response = await fetchWithRetry(`${API_BASE}/${cloudId}`, {
+      method: 'GET'
     });
     
-    // Pantry 如果找不到 Basket 会返回 400 或 404
-    if (response.status === 400 || response.status === 404) {
+    if (response.status === 404) {
       return { isNewUser: true };
     }
     
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    const text = await response.text();
+    if (!text) return { isNewUser: true };
     
-    return await response.json();
+    return JSON.parse(text);
   } catch (err: any) {
-    console.error("Cloud Load Error:", err);
-    throw new Error('无法读取云端');
+    console.error("Cloud Pull Failed:", err);
+    throw new Error('云端无法访问');
   }
 };
 
